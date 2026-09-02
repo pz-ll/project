@@ -28,6 +28,8 @@ static const char* get_mime(const char *filename)
         return "text/css";
     if (strcmp(p, ".js") == 0)
         return "application/javascript";
+    if (strcmp(p, ".pdf") == 0)
+        return "application/pdf";
 
     return "application/octet-stream"; // 未知类型
 }

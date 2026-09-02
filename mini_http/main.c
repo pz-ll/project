@@ -75,3 +75,127 @@ static int create_listen_fd()
     set_nonblock(fd);
     return fd;
 }
+
+/**
+ * @brief 初始化客户端数组，全部标记为空闲
+ */
+static void client_init()
+{
+    for (int i = 0; i < MAX_EVENTS; i++)
+    {
+        client_arr[i].fd = -1;       // fd=-1 表示空闲
+        client_arr[i].buf_len = 0;
+        client_arr[i].last_time = 0;
+    }
+}
+
+/**
+ * @brief 查找一个空闲的客户端槽位
+ * @return 空闲下标，-1表示槽位已满
+ */
+static int get_free_client()
+{
+    for (int i = 0; i < MAX_EVENTS; i++)
+    {
+        if (client_arr[i].fd == -1)
+            return i;
+    }
+    return -1;
+}
+
+/**
+ * @brief 根据fd值查找对应的客户端下标
+ * @param fd 客户端套接字
+ * @return 数组下标，-1未找到
+ *
+ * 从epoll事件中拿到fd后，需要反向找到对应的Client结构体
+ */
+static int find_client_by_fd(int fd)
+{
+    for (int i = 0; i < MAX_EVENTS; i++)
+    {
+        if (client_arr[i].fd == fd)
+            return i;
+    }
+    return -1;
+}
+
+/**
+ * @brief 关闭客户端连接，释放所有资源
+ * @param epfd epoll实例fd
+ * @param slot 客户端数组下标
+ *
+ * 统一的连接清理函数，避免代码重复：
+ * 1. 从epoll移除  2. 关闭套接字  3. 重置结构体字段
+ */
+static void close_client(int epfd, int slot)
+{
+    Client *cli = &client_arr[slot];
+    if (cli->fd < 0)
+        return; // 已经关闭了，直接返回
+
+    // 从epoll监控中移除
+    epoll_ctl(epfd, EPOLL_CTL_DEL, cli->fd, NULL);
+    // 关闭套接字
+    close(cli->fd);
+    // 重置所有字段，标记为空闲
+    cli->fd = -1;
+    cli->buf_len = 0;
+    memset(cli->buf, 0, BUF_SIZE);
+    cli->last_time = 0;
+    cli->ip[0] = '\0';
+}
+
+/**
+ * @brief 检查并清理超时连接
+ * @param epfd epoll实例fd
+ *
+ * 遍历所有客户端，最后活动时间超过 CONN_TIMEOUT 秒的自动断开
+ * 防止长连接客户端长期闲置占用文件描述符
+ * 每秒由epoll_wait超时返回时触发一次
+ */
+static void check_timeout(int epfd)
+{
+    time_t now = time(NULL);
+    int count = 0; // 统计本次清理的连接数
+
+    for (int i = 0; i < MAX_EVENTS; i++)
+    {
+        if (client_arr[i].fd >= 0) // 只检查在线连接
+        {
+            // 当前时间 - 最后活动时间 > 超时阈值
+            if (now - client_arr[i].last_time > CONN_TIMEOUT)
+            {
+                char msg[128];
+                snprintf(msg, sizeof(msg),
+                         "timeout close: %s (idle %ds)",
+                         client_arr[i].ip, CONN_TIMEOUT);
+                log_error(msg);
+                close_client(epfd, i);
+                count++;
+            }
+        }
+    }
+
+    // 如果清理了连接，打印汇总
+    if (count > 0)
+    {
+        char msg[64];
+        snprintf(msg, sizeof(msg), "cleanup %d timeout connections", count);
+        log_error(msg);
+    }
+}
+
+/**
+ * @brief 获取当前毫秒级时间戳
+ * @return 毫秒数
+ *
+ * 用于计算请求响应耗时
+ * gettimeofday 精度到微秒，这里转为毫秒
+ */
+static long get_millis()
+{
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return tv.tv_sec * 1000 + tv.tv_usec / 1000;
+}

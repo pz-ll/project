@@ -199,3 +199,50 @@ static long get_millis()
     gettimeofday(&tv, NULL);
     return tv.tv_sec * 1000 + tv.tv_usec / 1000;
 }
+
+
+/**
+ * @brief 主函数：程序入口
+ */
+int main()
+{
+    // ===== 初始化阶段 =====
+
+    // 1. 确保静态资源目录存在
+    system("mkdir -p ./www");
+
+    // 2. 创建epoll实例
+    int epfd = epoll_create1(0);
+    if (epfd < 0)
+    {
+        log_error("epoll_create1 failed");
+        exit(1);
+    }
+
+    // 3. 创建监听套接字
+    int listen_fd = create_listen_fd();
+
+    // 4. 初始化客户端数组
+    client_init();
+
+    // 5. 将监听fd加入epoll监控，关注可读事件（新连接）
+    struct epoll_event ev, events[MAX_EVENTS];
+    ev.data.fd = listen_fd;
+    ev.events = EPOLLIN;
+    if (epoll_ctl(epfd, EPOLL_CTL_ADD, listen_fd, &ev) < 0)
+    {
+        log_error("epoll_ctl add listen failed");
+        close(listen_fd);
+        close(epfd);
+        exit(1);
+    }
+
+    // 6. 打印启动信息
+    printf("Server running on http://127.0.0.1:%d\n", PORT);
+    printf("Static root: %s\n", DOC_ROOT);
+    printf("Connection timeout: %ds\n", CONN_TIMEOUT);
+    printf("Log file: %s\n", LOG_FILE);
+    printf("================================================\n");
+
+
+}

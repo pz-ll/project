@@ -244,5 +244,146 @@ int main()
     printf("Log file: %s\n", LOG_FILE);
     printf("================================================\n");
 
+    // ===== epoll主事件循环（程序核心死循环） =====
+    while (1)
+    {
+        // epoll_wait 超时设为1000ms（1秒）
+        // 作用：无事件时每秒返回一次，用于检查超时连接
+        int nfds = epoll_wait(epfd, events, MAX_EVENTS, 1000);
+        if (nfds < 0)
+        {
+            log_error("epoll_wait error");
+            continue;
+        }
+
+        // ===== 每次循环检查一次超时连接 =====
+        check_timeout(epfd);
+
+        // ===== 处理所有就绪事件 =====
+        for (int i = 0; i < nfds; i++)
+        {
+            int fd = events[i].data.fd;
+
+            // ==========================================
+            // 分支1：fd == 监听fd → 有新客户端发起TCP连接
+            // ==========================================
+            if (fd == listen_fd)
+            {
+                struct sockaddr_in cli_addr;
+                socklen_t cli_len = sizeof(cli_addr);
+
+                // 取出完成三次握手的客户端
+                int cfd = accept(listen_fd, (struct sockaddr*)&cli_addr, &cli_len);
+                if (cfd < 0)
+                {
+                    log_error("accept failed");
+                    continue;
+                }
+
+                // 设置非阻塞
+                set_nonblock(cfd);
+
+                // 找空闲槽位
+                int slot = get_free_client();
+                if (slot == -1)
+                {
+                    // 并发达到上限，直接拒绝
+                    log_error("too many connections, refused");
+                    close(cfd);
+                    continue;
+                }
+
+                // 保存客户端信息
+                Client *cli = &client_arr[slot];
+                cli->fd = cfd;
+                cli->buf_len = 0;
+                cli->last_time = time(NULL); // 记录连接建立时间
+                // 将二进制IP转换为字符串
+                inet_ntop(AF_INET, &cli_addr.sin_addr, cli->ip, sizeof(cli->ip));
+
+                // 将新客户端fd加入epoll监控
+                ev.data.fd = cfd;
+                ev.events = EPOLLIN;
+                epoll_ctl(epfd, EPOLL_CTL_ADD, cfd, &ev);
+
+            }
+            // ==========================================
+            // 分支2：普通客户端fd → 浏览器发来HTTP请求数据
+            // ==========================================
+            else
+            {
+                // 根据fd找到对应的客户端槽位
+                int slot = find_client_by_fd(fd);
+                if (slot == -1)
+                    continue;
+
+                Client *cli = &client_arr[slot];
+
+                // 更新最后活动时间（有数据到来）
+                cli->last_time = time(NULL);
+
+                // ===== 请求长度限制检查 =====
+                // 计算缓冲区剩余空间
+                int remain = BUF_SIZE - cli->buf_len - 1;
+                if (remain <= 0)
+                {
+                    // 缓冲区已满，请求过大，直接断开连接
+                    // 防止恶意超大请求导致缓冲区溢出
+                    char msg[128];
+                    snprintf(msg, sizeof(msg),
+                             "request too large from %s, closing", cli->ip);
+                    log_error(msg);
+                    close_client(epfd, slot);
+                    continue;
+                }
+
+                // ===== 读取客户端数据 =====
+                // 追加到缓冲区尾部，解决TCP粘包/分包
+                int n = recv(fd, cli->buf + cli->buf_len, remain, 0);
+                if (n <= 0)
+                {
+                    // n=0：客户端正常关闭
+                    // n<0：网络异常
+                    char msg[128];
+                    snprintf(msg, sizeof(msg),
+                             "connection closed: %s", cli->ip);
+                    close_client(epfd, slot);
+                    continue;
+                }
+
+                // 更新缓冲区有效长度
+                cli->buf_len += n;
+
+                // ===== 解析HTTP请求 =====
+                HttpRequest req;
+                http_req_init(&req);
+                int ret = parse_http(cli->buf, cli->buf_len, &req);
+                if (ret == 0)
+                {
+                    // 记录响应开始时间
+                    long start = get_millis();
+
+                    // 发送HTTP响应（读取文件 + sendfile）
+                    send_response(fd, &req);
+
+                    // 计算响应耗时（毫秒）
+                    long cost = get_millis() - start;
+
+                    // ===== 长短连接处理 =====
+                    if (!req.keep_alive)
+                    {
+                        // 短连接：响应发送完毕直接关闭
+                        close_client(epfd, slot);
+                    }
+                    else
+                    {
+                        // 长连接：不清fd，只清空缓冲区，等待下一次请求
+                        cli->buf_len = 0;
+                        memset(cli->buf, 0, BUF_SIZE);
+                    }
+                }
+            }
+        }
+    }
 
 }

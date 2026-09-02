@@ -211,7 +211,10 @@ int main()
     // 1. 确保静态资源目录存在
     system("mkdir -p ./www");
 
-    // 2. 创建epoll实例
+    // 2. 初始化日志系统
+    log_init();
+
+    // 3. 创建epoll实例
     int epfd = epoll_create1(0);
     if (epfd < 0)
     {
@@ -219,13 +222,13 @@ int main()
         exit(1);
     }
 
-    // 3. 创建监听套接字
+    // 4. 创建监听套接字
     int listen_fd = create_listen_fd();
 
-    // 4. 初始化客户端数组
+    // 5. 初始化客户端数组
     client_init();
 
-    // 5. 将监听fd加入epoll监控，关注可读事件（新连接）
+    // 6. 将监听fd加入epoll监控，关注可读事件（新连接）
     struct epoll_event ev, events[MAX_EVENTS];
     ev.data.fd = listen_fd;
     ev.events = EPOLLIN;
@@ -237,7 +240,7 @@ int main()
         exit(1);
     }
 
-    // 6. 打印启动信息
+    // 7. 打印启动信息
     printf("Server running on http://127.0.0.1:%d\n", PORT);
     printf("Static root: %s\n", DOC_ROOT);
     printf("Connection timeout: %ds\n", CONN_TIMEOUT);
@@ -306,6 +309,10 @@ int main()
                 ev.events = EPOLLIN;
                 epoll_ctl(epfd, EPOLL_CTL_ADD, cfd, &ev);
 
+                // 日志：新连接建立
+                char msg[128];
+                snprintf(msg, sizeof(msg), "new connection from %s", cli->ip);
+                log_error(msg);
             }
             // ==========================================
             // 分支2：普通客户端fd → 浏览器发来HTTP请求数据
@@ -347,6 +354,7 @@ int main()
                     char msg[128];
                     snprintf(msg, sizeof(msg),
                              "connection closed: %s", cli->ip);
+                    log_error(msg);
                     close_client(epfd, slot);
                     continue;
                 }
@@ -368,6 +376,10 @@ int main()
 
                     // 计算响应耗时（毫秒）
                     long cost = get_millis() - start;
+
+                    // 记录访问日志（IP + 方法 + URL + 状态码 + 耗时）
+                    log_access(cli->ip, req.method, req.url,
+                               req.status_code, cost);
 
                     // ===== 长短连接处理 =====
                     if (!req.keep_alive)
